@@ -1,0 +1,662 @@
+// Códificado por João Baptista Zanin.
+//
+
+#include <Trade\Trade.mqh>
+CTrade Trade;     // Para enviar e fechar posições
+#include <Trade\PositionInfo.mqh>
+CPositionInfo positionInfo; // to get info about current positions
+
+
+//+------------------------------------------------------------------+
+//| Parâmetros de entrada                                            |
+//+------------------------------------------------------------------+
+
+input string          título1=" ";                // #############################
+input double          contratos=1.0;              // Número de contratos
+input int             iRSI_Period=2;             // Periodo do RSI
+input int             iRSI_Sobrecomprado=75;      // Linha de sobrecompra
+input int             iRSI_Sobrevendido=25;       // Linha de sobrevenda
+input ENUM_TIMEFRAMES TimeFrame = PERIOD_CURRENT; // Tempo do gráfico
+
+input string          título3=" ";                // ##########SEGURANÇA###########
+input int             MargemTotalDisponível=10000; // Margem Total Disponível para operar
+
+input string          título2=" ";                // #########HORÁRIOS############
+input int             hAbertura=9;                // Hora de Abertura
+input int             mAbertura=15;               // Minuto de Abertura
+input int             hFechamento=17;             // Hora de Fechamento
+input int             mFechamento=20;             // Minuto de Fechamento 
+input int             hFecharPosicao=17;          // Horário de Fechar posições
+input int             mFecharPosicao=40;          // Minuto de Fechar posições
+
+string                titulo4=" ";                // ###########LIXAIADA############
+int                   pos=0;
+ulong                 magicNum = 123456;          // Magic Number
+ulong                 desvPts = 50;               // Desvio em pontos
+
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS DE HORÁRIO                                             |
+//+------------------------------------------------------------------+
+
+MqlDateTime           horarioAtual;
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE MONITORAMENTO                               |
+//+------------------------------------------------------------------+
+
+int      gl_Tick=0;              // Contar o número de negócios  
+int      gl_Order=0;             // Compra, venda ou não faz nada
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE GESTÃO DE CUSTÓDIA                          |
+//+------------------------------------------------------------------+
+
+bool     gl_OpenPosition=false;  // Tenho posição aberta (1)
+long     gl_PositionType=-1;     // Estou comprado ou vendido (2)
+double   gl_Contratos=0;         // Qual a posição de custódia no servidor (3)
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE GESTÃO DE ELEMENTOS GRÁFICOS                |
+//+------------------------------------------------------------------+
+
+bool     iRSI_InitHandle=false;  // Handle do RSI
+bool     iRSI_InitChart=false;   // RSI foi colocado no gráfico
+
+//+------------------------------------------------------------------+
+//| HANDLES                                                          |
+//+------------------------------------------------------------------+
+
+int      iRSI_Handle=INVALID_HANDLE;      // Handle do RSI
+
+//+------------------------------------------------------------------+
+//| BUFFERS                                                          |
+//+------------------------------------------------------------------+
+
+double   iRSI_Buffer[];          // Armazena os valores do RSI
+
+//+------------------------------------------------------------------+
+//| IMPEDE DE COMPRAR NA MESMA BARRA, SÓ NA PRÓXIMA                  |
+//+------------------------------------------------------------------+
+   
+bool  NovaBarra()
+      {
+       static datetime horaAntiga = 0;      
+       datetime horaAtual = (int) SeriesInfoInteger(_Symbol, _Period, SERIES_LASTBAR_DATE);    // Para saber a hora de abertura da ultima barra
+       
+       if(horaAntiga == 0)
+         {
+          horaAntiga = horaAtual;     //
+          return false;
+         }
+         
+       else if(horaAntiga != horaAtual)
+         {
+          horaAntiga = horaAtual;
+          return true;
+         }
+       else
+         {
+          return false;
+         }
+      }
+
+//+------------------------------------------------------------------+
+//| HORÁRIO DE FUNCIONAMENTO DO EA                                   |
+//+------------------------------------------------------------------+
+bool  HoraNegociacao()
+     {
+      if(horarioAtual.hour >= hAbertura && horarioAtual.hour <= hFechamento)
+         {
+          if(horarioAtual.hour == hAbertura)
+            {
+             if(horarioAtual.min >= mAbertura)
+               {
+                return true;
+               }
+             else
+               {
+                return false;
+               }
+            }
+          if(horarioAtual.hour == hFechamento)
+            {
+             if(horarioAtual.min <= mFechamento)
+               {
+                return true;
+               }
+             else
+               {
+                return false;
+               }
+            }
+          return true;
+         }
+       return false;
+     }
+
+//+------------------------------------------------------------------+
+//| HORÁRIO DE FECHAMENTO DO EA                                      |
+//+------------------------------------------------------------------+ 
+
+bool   HoraFechamento()
+       {
+        TimeToStruct(TimeCurrent(), horarioAtual);
+        if(horarioAtual.hour >= hFecharPosicao)
+          {
+           if(horarioAtual.hour == hFecharPosicao)
+             {
+              if(horarioAtual.min >= mFecharPosicao)
+                {
+                 return true;
+                }
+              else
+                {
+                 return false;
+                }
+             }
+           return true;
+          }
+         return false;
+       }
+   
+//+------------------------------------------------------------------+
+//| DECLARAÇÃO DE FECHAMENTO DE POSIÇÃO                              |
+//+------------------------------------------------------------------+ 
+
+void  FechaPosicao()
+      {
+       for(int i = PositionsTotal()-1; i>=0; i--)
+         {
+          string symbol = PositionGetSymbol(i);
+          ulong  magic = PositionGetInteger(POSITION_MAGIC);
+          if(symbol == _Symbol && magic == magicNum)
+            {
+             ulong PositionTicket = PositionGetInteger(POSITION_TICKET);
+             if(Trade.PositionClose(PositionTicket, desvPts))
+               {
+                Print("⬜ Posição fechada - sem falha. ResultRetcode: ", Trade.ResultRetcode(), ", RetCodedescription: ", Trade.ResultRetcodeDescription());
+               }
+            }
+         }
+      }
+
+                //+------------------------------------------------------------------+
+               //|                                                                  |
+              //| EXPERT ONINIT                                                    |
+             //|                                                                  |
+            //+------------------------------------------------------------------+
+
+int OnInit()
+  {
+  
+//+------------------------------------------------------------------+
+//| CHART INITIALIZATION                                             |
+//+------------------------------------------------------------------+  
+
+   ResetLastError();
+   Comment(" ");     // Comentário que aparece no topo do gráfico
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE MONITORAMENTO                               |
+//+------------------------------------------------------------------+
+
+   gl_Tick=0;              // Contar o número de negócios  
+   gl_Order=0;             // Compra, venda ou não faz nada
+
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE GESTÃO DE CUSTÓDIA                          |
+//+------------------------------------------------------------------+
+
+   gl_OpenPosition=false;  // Tenho posição aberta (1)
+   gl_PositionType=-1;     // Estou comprado ou vendido (2)
+   gl_Contratos=0;         // Qual a posição de custódia no servidor (3)
+
+//+------------------------------------------------------------------+
+//| VALIDACOES DO TIPO DE CONTA DO USUÁRIO                           |
+//+------------------------------------------------------------------+
+
+   if(AccountInfoInteger(ACCOUNT_TRADE_MODE)!=0)        // Solicitar o tipo de conta logado - Excluir isso caso queira conta real
+     {
+      Print("⬛ Robô programado para operar somente em conta demo.");
+      return(INIT_FAILED);
+     }
+     
+    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=0)      // Modo NETTING para comprar um e vender um compensando. Ficando zerado. Para não ficar no modo heading (comprado e vendido independente).
+     {
+      Print("⬛ Robô programado para operar somente em tipo NETTING.");
+      return(INIT_FAILED);
+     }
+
+   if(AccountInfoInteger(ACCOUNT_LOGIN)!=1090914809)
+     {
+      Print("⬛ Conta não autorizada, contatar suporte!");
+      return(INIT_FAILED);
+     }
+
+//+------------------------------------------------------------------+
+//| ANÁLISE DE VARIÁVEIS DE CONTRATOS                                |
+//+------------------------------------------------------------------+
+
+   if(contratos<=0)
+   {
+   Print("⬛ O número de contratos não pode ser zero ou menor que zero.");
+      return(INIT_FAILED);
+   }
+
+   if(contratos>5)
+   {
+   Print("⬛ O número de contratos não pode ser maior que 5.");
+      return(INIT_FAILED);
+   }   
+      
+//+------------------------------------------------------------------+
+//| ANÁLISE DE VARIÁVEIS DE HORÁRIO                                  |
+//+------------------------------------------------------------------+
+   
+   if(hAbertura<0 || hAbertura>23)
+     {
+      Print("⬛ O horário de abertura não pode ser menor ou igual a zero e não pode ser maior que 23.");
+      return(INIT_FAILED);
+     }
+   
+   if(mAbertura<0 || mAbertura>59)
+     {
+      Print("⬛ O minuto de abertura não pode ser igual a zero e não pode ser maior que 59.");
+      return(INIT_FAILED);
+     }
+   
+   if(hFechamento<0 || hFechamento>23)
+     {
+      Print("⬛ O horário de fechamento não pode ser menor ou igual a zero e não pode ser maior que 23.");
+      return(INIT_FAILED);
+     }
+       
+   if(mFechamento<0 || mFechamento>59)
+     {
+      Print("⬛ O minuto de abertura não pode ser igual a zero e não pode ser maior que 59.");
+      return(INIT_FAILED);
+     }
+   
+   if(hFechamento<hAbertura)
+     {
+      Print("⬛ O horário de fechamento não pode ser menor que o horário de abertura.");
+      return(INIT_FAILED);
+     }
+   
+   if(mFechamento>=mFecharPosicao)
+     {
+      Print("⬛ O horário de fechamento não pode ser maior que o horário fechamento de posição.");
+      return(INIT_FAILED);
+     }
+//+------------------------------------------------------------------+
+//| ANÁLISE DE VARIÁVEIS DOS INDICADORES                             |
+//+------------------------------------------------------------------+   
+
+      if(iRSI_Period<=0)
+        {
+         Print("⬛ O período do RSI não pode ser menor ou igual a zero.");
+         return(INIT_FAILED);
+        }
+ 
+//+------------------------------------------------------------------+
+//| ANÁLISE DOS ATIVOS PERMITIDOS                                    |
+//+------------------------------------------------------------------+  
+
+    if(StringSubstr(_Symbol, 0,3)!="WIN" &&   // Lista dos ativos permitidos, se colocar o robo em qualquer um que não seja esses, vai falhar, pode excluir esse comando para permitir todos
+       StringSubstr(_Symbol, 0,3)!="IND" &&
+       StringSubstr(_Symbol, 0,3)!="WDO" &&
+       StringSubstr(_Symbol, 0,3)!="DOL")
+     {
+      Print("⬛ Ativo não permitido.");
+      return(INIT_FAILED);
+     }
+     
+    if(StringSubstr(_Symbol, 0,4)=="WIN$" ||   // Lista dos ativos permitidos, se colocar o robo em qualquer um que não seja esses, vai falhar, pode excluir esse comando para permitir todos
+       StringSubstr(_Symbol, 0,4)=="WIN@" ||
+       StringSubstr(_Symbol, 0,4)=="WDO$" ||
+       StringSubstr(_Symbol, 0,4)=="WDO@" ||
+       StringSubstr(_Symbol, 0,4)=="IND$" ||
+       StringSubstr(_Symbol, 0,4)=="IND@" ||
+       StringSubstr(_Symbol, 0,4)=="DOL$" ||
+       StringSubstr(_Symbol, 0,4)=="DOL@")
+     {
+      Print("⬛ Não é permitido o uso de séries históricas, use o contrato oficial.");
+      return(INIT_FAILED);
+     }
+     
+          
+     
+//+------------------------------------------------------------------+
+//| HANDLES                                                          |
+//+------------------------------------------------------------------+ 
+
+      iRSI_Handle = iRSI (_Symbol, TimeFrame, iRSI_Period, PRICE_CLOSE);                  // Parâmetros do indicador
+      
+      if(iRSI_Handle==INVALID_HANDLE)
+         {
+          Print(" Erro na criação do handle do iRSI: ", GetLastError());
+          return(INIT_FAILED);
+         }
+      else
+        {
+         iRSI_InitHandle=true;
+        }     
+     
+//+------------------------------------------------------------------+
+//| ARRAYSETASSERIES                                                 |
+//+------------------------------------------------------------------+ 
+
+   if(ArraySetAsSeries(iRSI_Buffer, true))    // Troca o 0 que O iRSI_Buffer reconhece para o ultimo candle, ao invéz do primeiro da série histórica
+ 
+//+------------------------------------------------------------------+
+//| CHART INDICATOR ADD                                              |
+//+------------------------------------------------------------------+ 
+
+      if(!ChartIndicatorAdd(ChartID(), 1, iRSI_Handle))     // 0 significa que é no gráfico, 1 pra indicador em baixo, 2 pra outro indicador em baixo
+        {
+         Print("⬛ Erro na plotagem do indicador iRSI_Handle no gráfico: ", GetLastError());
+         return(INIT_FAILED);
+        }
+      else
+        {
+         iRSI_InitChart=true;
+        }
+        
+//+------------------------------------------------------------------+
+//| INICIALIZAÇÃO REALIZADA COM SUCESSO                              |
+//+------------------------------------------------------------------+
+
+   Print("⬜ Inicialização realizada com sucesso");
+   return(INIT_SUCCEEDED);
+   
+}   // Chave final da Oninit
+                //+------------------------------------------------------------------+
+               //                                                                   |
+              //| EEXPERT ONDEINIT                                                 |
+             //                                                                   |
+            //+------------------------------------------------------------------+
+
+void OnDeinit(const int reason)
+  {
+//+------------------------------------------------------------------+
+//| CHART INITIALIZATION                                             |
+//+------------------------------------------------------------------+  
+
+   ResetLastError();
+
+//+------------------------------------------------------------------+
+//| INDICATOR RELEASE                                                |
+//+------------------------------------------------------------------+ 
+
+   if(iRSI_InitHandle && !IndicatorRelease(iRSI_Handle))
+      Print("⬛ Erro no release do iRSI_Handle: ", GetLastError());  // Removi os indicadores (handles)
+
+//+------------------------------------------------------------------+
+//| ARRAYFREE                                                        |
+//+------------------------------------------------------------------+ 
+
+   ArrayFree(iRSI_Buffer);                                          // Limpei os buffers
+
+//+------------------------------------------------------------------+
+//| DELETE CHART INDICATOR                                           |
+//+------------------------------------------------------------------+ 
+
+      string iRSI_chart = ChartIndicatorName(0, 1, 0);
+      if(iRSI_InitChart && !ChartIndicatorDelete(0, 1, iRSI_chart))
+        {
+         Print("⬛ Erro na remoção do iRSI_chart: ", GetLastError() );
+        }
+
+//+------------------------------------------------------------------+
+//| DEINICIALIZAÇÃO REALIZADA COM SUCESSO                            |
+//+------------------------------------------------------------------+ 
+
+   Print("⬜ Deinicialização executada");
+   
+} // Chave final da OnDeinit
+                //+------------------------------------------------------------------+
+               //|                                                                  |
+              //| EXPERT ON TICK                                                   |
+             //|                                                                  |
+            //+------------------------------------------------------------------+
+
+void OnTick()
+  {
+//+------------------------------------------------------------------+
+//| CHART INITIALIZATION                                             |
+//+------------------------------------------------------------------+  
+   
+   ResetLastError();    // Zeramos variáveis de controle
+
+//+------------------------------------------------------------------+
+//| TRADE.SET                                                        |
+//+------------------------------------------------------------------+
+
+   Trade.SetDeviationInPoints(50);
+   Trade.SetExpertMagicNumber(123456);
+
+//+------------------------------------------------------------------+
+//| HORÁRIOS DE FUNCIONAMENTO                                        |
+//+------------------------------------------------------------------+ 
+ 
+   if(HoraNegociacao())
+     {
+      Comment("Dentro do horário de negociação");
+     }
+   else
+     {
+      Comment("Fora do horário de negociação");
+     }
+     
+     
+   if(HoraFechamento())
+     {
+      Comment("Horário de fechamento de posições");
+      FechaPosicao();
+     }
+   else if(HoraNegociacao())
+          {
+           Comment("Dentro do horário de negociação");
+          }
+   else
+     {
+      Comment("Fora do horário de negociação");
+     }
+//+------------------------------------------------------------------+
+//| SABER A HORA ATUAL DA ULTIMA COTAÇÃO                             |
+//+------------------------------------------------------------------+
+     
+   TimeToStruct(TimeCurrent(), horarioAtual);
+
+//+------------------------------------------------------------------+
+//| SINCRONIZA O HORÁRIO DO SERVIDOR                                 |
+//+------------------------------------------------------------------+ 
+
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   
+//+------------------------------------------------------------------+
+//| ATUALIZA VARIÁVEIS DE HORÁRIO                                    |
+//+------------------------------------------------------------------+ 
+
+   
+   int loc_horarioAtual=dt.hour*60+dt.min;                   // Horário atual em minutos
+   int loc_horarioAbertura=hAbertura*60+mAbertura;           // Horário de abertura em minutos
+   int loc_horarioFechamento=hFechamento*60+mFechamento;     // Horário de fechamento em minutos
+   int loc_horarioFechPosi=hFecharPosicao*60+mFecharPosicao; // Horário de fechamento de posição em minutos
+   
+   if(loc_horarioAtual<loc_horarioAbertura)
+     {
+      Comment("[MERCADO FECHADO | ABERTURA] ", dt.hour, ":", dt.min, ":", dt.sec);
+     }
+   if(loc_horarioAtual>loc_horarioFechamento)
+     {
+      Comment("[MERCADO FECHADO | FECHAMENTO] ", dt.hour, ":", dt.min, ":", dt.sec);
+     }
+ 
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE MONITORAMENTO                               |
+//+------------------------------------------------------------------+ 
+
+   gl_Tick++;              // Contar o número de negócios
+   gl_Order=0;             // Compra, venda ou não faz nada
+   
+//+------------------------------------------------------------------+
+//| VARIÁVEIS GLOBAIS DE GESTÃO DE CUSTÓDIA                          |
+//+------------------------------------------------------------------+ 
+
+   gl_OpenPosition=false;  // Tenho posição aberta? (1)
+   gl_PositionType=-1;     // Estou comprado ou vendido? (2)
+   gl_Contratos=0;         // Qual a posição de custódia no servidor? (3)
+     
+//+------------------------------------------------------------------+
+//| INICIALIZA COYBUFFER                                             |
+//+------------------------------------------------------------------+   
+
+   string signal="";
+
+   
+   CopyBuffer(iRSI_Handle,0,0,3,iRSI_Buffer);
+   
+   double myRSIValue=NormalizeDouble(iRSI_Buffer[0],2);
+   
+   if(myRSIValue<iRSI_Sobrevendido)
+      {
+      signal="buy";
+      gl_Order=1;
+      }
+      
+   if(myRSIValue>iRSI_Sobrecomprado)
+      {
+      signal="sell";
+      gl_Order=-1;
+      }
+      
+//+------------------------------------------------------------------+
+//| ATUALIZA POSIÇÃO                                                 |
+//+------------------------------------------------------------------+ 
+
+   gl_OpenPosition=PositionSelect(_Symbol);
+   
+   if(gl_OpenPosition==true)
+     {
+      gl_PositionType=PositionGetInteger(POSITION_TYPE);    // Comprado ou vendido
+      gl_Contratos=PositionGetDouble(POSITION_VOLUME);      // Quantos contratos custódia
+      //Print("⬜ Robô posicionado: ", gl_Contratos);
+     }   
+   else // glOpenPosition==false
+     {
+      gl_PositionType=WRONG_VALUE;  // (-1)
+      //Print("⬜ Robô não posicionado: ", gl_Contratos, " na posição de ", gl_PositionType);
+     }
+
+//+------------------------------------------------------------------+
+//| HOLD COMPRA                                                      |
+//+------------------------------------------------------------------+
+
+   if(gl_OpenPosition==true && gl_PositionType==POSITION_TYPE_BUY && gl_Order==1)
+     {
+      gl_Order=0;               // Restrição de compra caso já esteja comprado
+      //Print("⬜ Acionado compra com o robô já comprado, desconsiderando.");
+     }
+          
+//+------------------------------------------------------------------+
+//| COMPRA                                                           |
+//+------------------------------------------------------------------+
+
+if(gl_Order!=0)   // gl_order = 1 compra, 0 não faz nada, -1 vende.
+    {
+      MqlTick price_info;
+      ZeroMemory(price_info);
+      
+      if(!SymbolInfoTick(_Symbol, price_info))     // Jogo para a price_info os valores atualizados do ativo
+        {
+         Print("⬛ Falha na atualização do preço: ", GetLastError());
+         return;
+        }
+        
+   if(signal=="buy" && HoraNegociacao())
+     {
+      //First close all Sell positions
+      for(pos=0; pos<PositionsTotal(); pos++)
+        {
+         //Select the position to load info
+         if(positionInfo.SelectByIndex(pos))
+           {
+            // Get the position type, if sell then close it
+            if(positionInfo.PositionType()==POSITION_TYPE_SELL)
+              {
+               Trade.PositionClose(positionInfo.Ticket());
+              }
+           }
+        }
+      if(gl_Order==1)
+        {
+         Trade.Buy(1,Symbol());
+         Print("⬜ RSI sobrevendido, compra acionada.");
+        }
+      }
+    }
+
+//+------------------------------------------------------------------+
+//| HOLD VENDA                                                       |
+//+------------------------------------------------------------------+
+
+   if(gl_OpenPosition==true && gl_PositionType==POSITION_TYPE_SELL && gl_Order==-1)
+     {
+      gl_Order=0;    // Restrição de venda caso já esteja vendido
+      //Print("⬜ Acionado venda com o robô já vendido, desconsiderando.");
+     }
+
+//+------------------------------------------------------------------+
+//| VENDA                                                            |
+//+------------------------------------------------------------------+
+
+if(gl_Order!=0)   // gl_order = 1 compra, 0 não faz nada, -1 vende.
+    {
+      MqlTick price_info;
+      ZeroMemory(price_info);
+      
+      if(!SymbolInfoTick(_Symbol, price_info))     // Jogo para a price_info os valores atualizados do ativo
+        {
+         Print("⬛ Falha na atualização do preço: ", GetLastError());
+         return;
+        }
+        
+   if(signal=="sell" && HoraNegociacao())
+     {
+      //First close all Buy positions
+      for(pos=0; pos<PositionsTotal(); pos++)
+        {
+         //Select the position to load info
+         if(positionInfo.SelectByIndex(pos))
+           {
+            // Get the position type, if buy then close it
+            if(positionInfo.PositionType()==POSITION_TYPE_BUY)
+              {
+               Trade.PositionClose(positionInfo.Ticket());
+              }
+           }
+        }
+      if(gl_Order==-1)
+        {
+         Trade.Sell(1,Symbol());
+         Print("⬜ RSI sobrecomprado, venda acionada.");
+        }
+      }
+    }
+
+
+
+//+------------------------------------------------------------------+
+//| COMENTÁRIO GRÁFICO                                               |
+//+------------------------------------------------------------------+
+
+   Comment("[EM EXECUÇÃO] NEGÓCIOS: ", gl_Tick," | CUSTODIA: ", gl_Contratos, "\n", "RELÓGIO: ", dt.hour, ":", dt.min, ":", dt.sec);
+   
+} // Chave final da OnTick
+
+   
+   
+//+------------------------------------------------------------------+
