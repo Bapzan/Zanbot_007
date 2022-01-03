@@ -1,0 +1,144 @@
+//+------------------------------------------------------------------+
+//|                                           9.1 Larry Williams.mq5 |
+//|                                  Copyright 2022, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2022, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+
+#include <Trade\Trade.mqh>
+CTrade Trade;
+
+//+------------------------------------------------------------------+
+//| INPUTS                                                           |
+//+------------------------------------------------------------------+   
+input double _volume = 1.0;        // Informe a quantidade de lotes
+input double SAR_passo=0.02;       // Incrementar passo do SAR 
+input double SAR_maximo=0.2;       // Nível de parada máximo
+input int    MM_periodo=9;         // Periodo da Média Móvel
+input ENUM_MA_METHOD    MM_metodo=MODE_EMA;   // Método da média
+
+
+
+// Armazena valores do SAR parabolic
+int handle_sar;
+// Armazena valores da média móvel
+int handle_mm;
+
+// Armazena array do SAR parabolic
+double array_sar[];
+// Armazena array da média móvel
+double array_mm[];
+// Armazena valores dos preços
+MqlRates rates[];
+
+
+
+
+
+int OnInit()
+  {
+   
+   // Oculta a grade no gráfico
+   ChartSetInteger(0, CHART_SHOW_GRID, false);     
+
+   
+   // Torna o primeiro candle a ser contado para o último
+   ArraySetAsSeries(rates, true);
+   ArraySetAsSeries(array_sar, true);
+   ArraySetAsSeries(array_mm, true);
+
+   
+   // Atribuindo os dados do indicador no handle
+   handle_sar = iSAR(Symbol(), Period(), SAR_passo, SAR_maximo);
+   handle_mm  = iMA(Symbol(), Period(), MM_periodo, 0, MM_metodo, PRICE_CLOSE);
+   
+   
+   
+   Print("⬜ Incialização realizada com sucesso!");
+   return(INIT_SUCCEEDED);
+  }
+
+
+void OnTick()
+  {
+   
+   // Handle do indicador, quantos buffers, começa a copiar da posição 0, copia 3 posições, copia para o array  
+   CopyBuffer(handle_sar, 0, 0, 3, array_sar); 
+   CopyBuffer(handle_mm, 0, 0, 3, array_mm); 
+  
+   // Simbolo, Periodo, começar posição 0, copia 3 posições, copia para o rates (no caso, esses são os preços)
+   CopyRates(Symbol(), Period(), 0, 3, rates);
+   
+   // Se posições abertas for igual a 0 && Ordens forem iguais a 0
+   if(PositionsTotal() == 0 && OrdersTotal() == 0)
+     {
+         // Se o preço de abertura de 1 candle atrás for menor que a MM do mesmo && preço close maior que a MM de 1 candle && MM 2 < MM 1 (MM caindo)
+         if(rates[1].open < array_mm[1] && rates[1].close > array_mm [1] && array_mm[2] < array_mm[1])
+           {
+            
+            // Somando 30 pontos na máxima no penultimo candle      
+            double priceOpen = rates[1].high + (30 * _Point);
+            // Stoploss 30 pontos abaixo do penultimo candle
+            double  _sl = rates[1].low - (30 * _Point);
+            // Compra stop 30 pontos acima da máxima do penultimo candle.
+            Trade.BuyStop(_volume, priceOpen, Symbol(), _sl, 0.00, 0, 0, "[COMPRA]");
+            Print("⬜ Média virou pra cima, compra acionada");
+           }
+     }
+   // PROBLEMA: Sars pulando stop
+   // Solução: preço indice é multiplo de 5, logo pegamos o preço e dividimos por 5
+   // Se posições totais forem igual a 1
+   if(PositionsTotal() == 1)
+     {
+         // pegando o MOD do valor do parabolic
+         double vSar = array_sar[0] - MathMod(array_sar[0], 5.00);
+         // Comentário do novo preço do SAR
+         Comment(" Sar Modificado: ", vSar);
+         // Move o SARS parabolic
+         moverStopLoss(vSar);
+     }
+}   
+
+// Função para trailing stop
+void moverStopLoss(double sarValue)
+    {
+        for(int i = PositionsTotal()-1 ; i>=0 ; i--)
+          {
+              //Na posição X quero saber qual ativo
+              string symbol = PositionGetSymbol(i);
+              // Verifica se o Symbol é o ativo que tá no gráfico
+              if(symbol == Symbol())
+                {
+                     // Pega o ticket da posição
+                     ulong ticket = PositionGetInteger(POSITION_TICKET);
+                     // Pega o preço de entrada
+                     double precoEntrada = PositionGetDouble(POSITION_PRICE_OPEN);
+                     // Pega o preço do stoploss
+                     double stopLoss = PositionGetDouble(POSITION_SL);
+                     // Pega o preço de takeprofit
+                     double takeProfit = PositionGetDouble(POSITION_TP);
+                     
+                     // Variável novo Stop Loss
+                     double novoSl;
+                     // Se o tipo da posição for posição de compra
+                     if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                       {
+                           // Se o valor do SAR for maior que o SL
+                           if(sarValue > stopLoss)
+                             {
+                                 // Então, o novo stoploss vai ser o próprio SAR                            
+                                 novoSl = NormalizeDouble(sarValue, _Digits);
+                                 
+                                 // Modificar o novo stoploss para o ticket
+                                 Trade.PositionModify(ticket, novoSl, 0.00);
+                                 Print("⬜ SARS Parabolic acima do SL, trailing stop ativado!");
+                             }
+                       }
+                }
+          }
+    }
+   
+
+//+------------------------------------------------------------------+
